@@ -1,10 +1,11 @@
 package client
 
 import (
+	"fmt"
 	"log"
 	"time"
 
-	"golang.design/x/clipboard"
+	"github.com/atotto/clipboard"
 )
 
 // ClipboardMonitor отслеживает изменения буфера обмена
@@ -26,13 +27,7 @@ func NewClipboardMonitor(onChange func(content string)) *ClipboardMonitor {
 
 // Start запускает мониторинг буфера обмена
 func (m *ClipboardMonitor) Start() error {
-	// Инициализируем библиотеку clipboard
-	err := clipboard.Init()
-	if err != nil {
-		return err
-	}
-
-	log.Printf("Clipboard monitor started")
+	log.Printf("Clipboard monitor started, polling every %v", m.pollInterval)
 
 	// Получаем текущее содержимое
 	m.updateLastHash()
@@ -41,6 +36,13 @@ func (m *ClipboardMonitor) Start() error {
 	go m.monitorLoop()
 
 	return nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // monitorLoop основной цикл мониторинга
@@ -61,12 +63,15 @@ func (m *ClipboardMonitor) monitorLoop() {
 // checkClipboard проверяет изменения в буфере обмена
 func (m *ClipboardMonitor) checkClipboard() {
 	// Читаем текущее содержимое
-	content := clipboard.Read(clipboard.FmtText)
-	if len(content) == 0 {
+	text, err := clipboard.ReadAll()
+	if err != nil {
+		log.Printf("Failed to read clipboard: %v", err)
 		return
 	}
 
-	text := string(content)
+	if len(text) == 0 {
+		return
+	}
 
 	// Вычисляем хеш
 	hash := computeHash(text)
@@ -74,7 +79,7 @@ func (m *ClipboardMonitor) checkClipboard() {
 	// Проверяем изменения
 	if hash != m.lastHash {
 		m.lastHash = hash
-		log.Printf("Local clipboard changed (hash: %s, size: %d bytes)", hash[:8], len(text))
+		log.Printf("Local clipboard changed (hash: %s, size: %d bytes)", hash[:min(8, len(hash))], len(text))
 
 		// Вызываем коллбек
 		if m.onChange != nil {
@@ -85,9 +90,9 @@ func (m *ClipboardMonitor) checkClipboard() {
 
 // updateLastHash обновляет последний хеш без вызова коллбека
 func (m *ClipboardMonitor) updateLastHash() {
-	content := clipboard.Read(clipboard.FmtText)
-	if len(content) > 0 {
-		m.lastHash = computeHash(string(content))
+	text, err := clipboard.ReadAll()
+	if err == nil && len(text) > 0 {
+		m.lastHash = computeHash(text)
 	}
 }
 
@@ -96,8 +101,13 @@ func (m *ClipboardMonitor) SetClipboard(text string) error {
 	// Обновляем хеш перед установкой, чтобы избежать петли
 	m.lastHash = computeHash(text)
 
-	clipboard.Write(clipboard.FmtText, []byte(text))
 	log.Printf("Clipboard updated from server (size: %d bytes)", len(text))
+
+	err := clipboard.WriteAll(text)
+	if err != nil {
+		log.Printf("Failed to write clipboard: %v", err)
+		return err
+	}
 
 	return nil
 }
@@ -108,15 +118,8 @@ func (m *ClipboardMonitor) Stop() {
 	log.Printf("Clipboard monitor stopped")
 }
 
-// computeHash вычисляет хеш строки (простая реализация)
+// computeHash вычисляет хеш строки
 func computeHash(data string) string {
-	// Используем ту же функцию что и в протоколе
-	// Импортируем из protocol если нужно
-	return hashString(data)
-}
-
-// hashString простая хеш-функция для избежания циклических зависимостей
-func hashString(s string) string {
 	// Простой FNV-1a hash
 	const (
 		offset64 = 14695981039346656037
@@ -124,11 +127,12 @@ func hashString(s string) string {
 	)
 
 	hash := uint64(offset64)
-	for i := 0; i < len(s); i++ {
-		hash ^= uint64(s[i])
+	for i := 0; i < len(data); i++ {
+		hash ^= uint64(data[i])
 		hash *= prime64
 	}
 
-	// Преобразуем в строку
-	return string(rune(hash))
+	// Преобразуем в hex строку
+	return fmt.Sprintf("%016x", hash)
 }
+
