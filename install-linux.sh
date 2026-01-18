@@ -4,7 +4,7 @@
 
 SERVICE_NAME="clipboard-client"
 BINARY_PATH="/usr/local/bin/clipboard-client"
-SERVER_URL="${SERVER_URL:-ws://192.168.1.1:8080/ws}"
+SERVER_URL="${SERVER_URL:-ws://192.168.1.1:9090/ws}"
 
 echo "🔧 Установка clipboard-client как systemd сервис"
 echo "================================================"
@@ -31,23 +31,28 @@ echo ""
 
 # Создаем systemd unit файл
 echo "📝 Создание systemd unit файла..."
-cat > "/etc/systemd/system/${SERVICE_NAME}.service" << EOF
+cat > "/etc/systemd/system/${SERVICE_NAME}.service" << 'ENDOFFILE'
 [Unit]
 Description=OpenWRT Clipboard Client
 After=network.target
 
 [Service]
 Type=simple
-User=$SUDO_USER
+User=__SUDO_USER__
 Environment="DISPLAY=:0"
-Environment="XAUTHORITY=/home/$SUDO_USER/.Xauthority"
-ExecStart=$BINARY_PATH -server $SERVER_URL
+Environment="XAUTHORITY=/home/__SUDO_USER__/.Xauthority"
+ExecStart=__BINARY_PATH__ -server __SERVER_URL__
 Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-EOF
+ENDOFFILE
+
+# Заменяем плейсхолдеры
+sed -i "s|__SUDO_USER__|${SUDO_USER}|g" "/etc/systemd/system/${SERVICE_NAME}.service"
+sed -i "s|__BINARY_PATH__|${BINARY_PATH}|g" "/etc/systemd/system/${SERVICE_NAME}.service"
+sed -i "s|__SERVER_URL__|${SERVER_URL}|g" "/etc/systemd/system/${SERVICE_NAME}.service"
 
 echo "✓ Unit файл создан: /etc/systemd/system/${SERVICE_NAME}.service"
 echo ""

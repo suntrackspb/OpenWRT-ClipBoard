@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -229,29 +231,41 @@ func (m *ClipboardMonitor) SetClipboard(content string) error {
 		if err != nil {
 			return err
 		}
-		// Сохраняем файл и копируем путь в буфер
+		// Сохраняем файл во временную директорию
 		savedPath, err := saveReceivedFile(filePath, fileContent)
 		if err != nil {
 			log.Printf("⚠️  Failed to save file: %v", err)
 			return err
 		}
-		log.Printf("📁 File saved: %s (%d bytes)", savedPath, len(fileContent))
-		// Копируем путь к сохраненному файлу в буфер
-		if m.useAdvanced {
-			clipboard.Write(clipboard.FmtText, []byte(savedPath))
-		} else {
-			goclipboard.WriteAll(savedPath)
+		log.Printf("📁 File saved to temp: %s (%d bytes)", savedPath, len(fileContent))
+		
+		// Копируем файл в буфер обмена
+		// На macOS используем pbcopy для правильного формата файлов
+		if err := copyFileToClipboard(savedPath); err != nil {
+			log.Printf("⚠️  Failed to copy file to clipboard: %v, trying text format", err)
+			// Fallback: используем текстовый формат
+			if m.useAdvanced {
+				clipboard.Write(clipboard.FmtText, []byte(savedPath))
+			} else {
+				goclipboard.WriteAll(savedPath)
+			}
 		}
+		
 		// Обновляем кэш чтобы не читать файл снова
 		m.lastFilePath = savedPath
-		m.lastHash = computeHash("FILE_PATH:" + savedPath) // Используем тот же формат что и при чтении
+		m.lastHash = computeHash("FILE_PATH:" + savedPath)
 	} else if strings.HasPrefix(content, "FILE_PATH:") {
 		// Это только путь к файлу (файл не был передан)
 		filePath := strings.TrimPrefix(content, "FILE_PATH:")
-		if m.useAdvanced {
-			clipboard.Write(clipboard.FmtText, []byte(filePath))
-		} else {
-			goclipboard.WriteAll(filePath)
+		// Копируем файл в буфер обмена
+		if err := copyFileToClipboard(filePath); err != nil {
+			log.Printf("⚠️  Failed to copy file to clipboard: %v, trying text format", err)
+			// Fallback: используем текстовый формат
+			if m.useAdvanced {
+				clipboard.Write(clipboard.FmtText, []byte(filePath))
+			} else {
+				goclipboard.WriteAll(filePath)
+			}
 		}
 		// Обновляем кэш чтобы не читать файл снова
 		m.lastFilePath = filePath
@@ -273,7 +287,7 @@ func (m *ClipboardMonitor) SetClipboard(content string) error {
 	return nil
 }
 
-// saveReceivedFile сохраняет полученный файл
+// saveReceivedFile сохраняет полученный файл во временную директорию
 func saveReceivedFile(originalPath string, content []byte) (string, error) {
 	// Извлекаем имя файла
 	fileName := originalPath
@@ -282,15 +296,23 @@ func saveReceivedFile(originalPath string, content []byte) (string, error) {
 		fileName = parts[len(parts)-1]
 	}
 
-	// Сохраняем в Downloads или временную директорию
-	downloadsDir := os.Getenv("HOME") + "/Downloads"
-	if _, err := os.Stat(downloadsDir); os.IsNotExist(err) {
-		downloadsDir = os.TempDir()
-	}
-
-	savePath := downloadsDir + "/clipboard_" + fileName
+	// Всегда сохраняем во временную директорию
+	// Это позволяет вставлять файл куда нужно через буфер обмена
+	tmpDir := os.TempDir()
+	
+	// Создаем уникальное имя чтобы не конфликтовать с другими файлами
+	timestamp := time.Now().Unix()
+	savePath := fmt.Sprintf("%s/clipboard_%d_%s", tmpDir, timestamp, fileName)
+	
 	err := os.WriteFile(savePath, content, 0644)
-	return savePath, err
+	if err != nil {
+		return "", err
+	}
+	
+	// На macOS/Linux файл в буфере обмена - это путь к файлу
+	// Когда пользователь вставляет его, система копирует файл в новое место
+	// Поэтому сохраняем во временную директорию - файл будет доступен для вставки
+	return savePath, nil
 }
 
 // Stop останавливает мониторинг
@@ -416,6 +438,80 @@ func decodeFile(encoded string) (string, []byte, error) {
 	filePath := parts[0]
 	fileContent, err := base64.StdEncoding.DecodeString(parts[1])
 	return filePath, fileContent, err
+}
+
+// copyFileToClipboard копирует файл в буфер обмена используя правильный формат
+// Поддерживает macOS, Linux (X11/Wayland) и Windows
+func copyFileToClipboard(filePath string) error {
+	// Проверяем что файл существует
+	if _, err := os.Stat(filePath); err != nil {
+		return fmt.Errorf("file does not exist: %v", err)
+	}
+
+	switch runtime.GOOS {
+	case "darwin":
+		// macOS: используем osascript для правильного формата файлов
+		script := fmt.Sprintf(`set the clipboard to (POSIX file "%s")`, filePath)
+		cmd := exec.Command("osascript", "-e", script)
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("osascript failed: %v", err)
+		}
+		log.Printf("📁 File copied to clipboard via osascript: %s", filePath)
+		return nil
+
+	case "linux":
+		// Linux: пробуем разные способы в зависимости от окружения
+		// Сначала пробуем wl-copy (Wayland)
+		if cmd := exec.Command("wl-copy"); cmd.Run() == nil {
+			// Wayland доступен, используем wl-copy с text/uri-list
+			fileURL := fmt.Sprintf("file://%s\r\n", filePath)
+			cmd := exec.Command("wl-copy", "--type", "text/uri-list")
+			cmd.Stdin = strings.NewReader(fileURL)
+			if err := cmd.Run(); err != nil {
+				// Fallback на обычный текст
+				return fmt.Errorf("wl-copy failed: %v", err)
+			}
+			log.Printf("📁 File copied to clipboard via wl-copy: %s", filePath)
+			return nil
+		}
+
+		// X11: используем xclip с text/uri-list
+		fileURL := fmt.Sprintf("file://%s\r\n", filePath)
+		cmd := exec.Command("xclip", "-i", "-selection", "clipboard", "-t", "text/uri-list")
+		cmd.Stdin = strings.NewReader(fileURL)
+		if err := cmd.Run(); err != nil {
+			// Fallback на обычный текст через xclip
+			cmd := exec.Command("xclip", "-i", "-selection", "clipboard")
+			cmd.Stdin = strings.NewReader(filePath)
+			if err := cmd.Run(); err != nil {
+				return fmt.Errorf("xclip failed: %v", err)
+			}
+			log.Printf("📁 File path copied to clipboard via xclip (text): %s", filePath)
+			return nil
+		}
+		log.Printf("📁 File copied to clipboard via xclip (uri-list): %s", filePath)
+		return nil
+
+	case "windows":
+		// Windows: используем PowerShell для копирования файла в буфер обмена
+		// PowerShell может копировать файл как объект через Add-Type и Clipboard
+		// Но проще использовать команду для копирования пути и надеяться что приложение распознает
+		// Для полной поддержки нужен WinAPI с CF_HDROP, но это сложнее
+		psScript := fmt.Sprintf(`[System.Windows.Forms.Clipboard]::SetText('%s')`, filePath)
+		cmd := exec.Command("powershell", "-Command", psScript)
+		if err := cmd.Run(); err != nil {
+			// Fallback: пробуем через cmd
+			cmd := exec.Command("cmd", "/c", "echo", filePath, "|", "clip")
+			if err := cmd.Run(); err != nil {
+				return fmt.Errorf("Windows clipboard failed: %v", err)
+			}
+		}
+		log.Printf("📁 File path copied to clipboard via PowerShell: %s", filePath)
+		return nil
+
+	default:
+		return fmt.Errorf("file clipboard not implemented for %s", runtime.GOOS)
+	}
 }
 
 // computeHash вычисляет хеш строки
