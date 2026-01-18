@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Download dependencies
+        run: |
+          go mod download
+          go mod verify
+
+      - name: Check formatting
+        run: |
+          if [ -n "$(gofmt -s -l .)" ]; then
+            echo "Go code is not formatted:"
+            gofmt -s -d .
+            exit 1
+          fi
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Build server
+        run: go build -v ./cmd/server
+
+      - name: Build client
+        run: go build -v ./cmd/client
+
+      - name: Test cross-compilation for all platforms
+        run: |
+          echo "Testing OpenWRT ARM64 build..."
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o /tmp/server-openwrt ./cmd/server
+          
+          echo "Testing Windows build..."
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/client-windows.exe ./cmd/client
+          
+          echo "Testing Linux build..."
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/client-linux ./cmd/client
+          
+          echo "Testing macOS ARM64 build..."
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o /tmp/client-macos-arm64 ./cmd/client
+          
+          echo "Testing macOS AMD64 build..."
+          GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/client-macos-amd64 ./cmd/client
+          
+          echo "✅ All platforms build successfully!"
+
+      - name: Display binary info
+        run: |
+          echo "📊 Binary sizes (test build):"
+          ls -lh /tmp/server-openwrt /tmp/client-* 2>/dev/null || true

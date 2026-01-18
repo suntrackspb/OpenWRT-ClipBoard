@@ -1,0 +1,121 @@
+package main
+
+import (
+	"flag"
+	"fmt"
+	"log"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+
+	"github.com/denisuvarov/openwrt-clipboard/internal/client"
+	"github.com/denisuvarov/openwrt-clipboard/internal/protocol"
+)
+
+var (
+	serverURL = flag.String("server", "ws://192.168.1.1:8080/ws", "WebSocket server URL")
+	clientID  = flag.String("id", "", "Client ID (auto-generated if empty)")
+	version   = "1.0.0"
+)
+
+func main() {
+	flag.Parse()
+
+	log.Printf("OpenWRT Clipboard Client v%s", version)
+
+	// Генерируем Client ID если не указан
+	if *clientID == "" {
+		hostname, err := os.Hostname()
+		if err != nil {
+			hostname = "unknown"
+		}
+		*clientID = fmt.Sprintf("%s-%d", hostname, os.Getpid())
+	}
+
+	log.Printf("Client ID: %s", *clientID)
+	log.Printf("Server URL: %s", *serverURL)
+
+	// Создаем WebSocket клиента
+	wsClient := client.NewWSClient(*serverURL, *clientID)
+
+	// Подключаемся к серверу
+	if err := wsClient.Connect(); err != nil {
+		log.Fatalf("Failed to connect to server: %v", err)
+	}
+
+	// Создаем монитор буфера обмена
+	clipMonitor := client.NewClipboardMonitor(func(content string) {
+		// Проверяем размер
+		if len(content) > protocol.MaxContentSize {
+			log.Printf("Clipboard content too large (%d bytes), not sending", len(content))
+			return
+		}
+
+		// Отправляем на сервер
+		wsClient.SendClipboard(content)
+	})
+
+	// Запускаем монитор
+	if err := clipMonitor.Start(); err != nil {
+		log.Fatalf("Failed to start clipboard monitor: %v", err)
+	}
+
+	// Запускаем WebSocket клиента
+	wsClient.Start()
+
+	// Обрабатываем сообщения от сервера
+	go func() {
+		for msg := range wsClient.ReceiveChan() {
+			switch msg.Type {
+			case protocol.TypeClipboardUpdate:
+				// Игнорируем свои собственные сообщения
+				if msg.ClientID == *clientID {
+					continue
+				}
+
+				log.Printf("Received clipboard update from %s (hash: %s, size: %d bytes)",
+					msg.ClientID, msg.Hash[:8], len(msg.Content))
+
+				// Обновляем локальный буфер обмена
+				if err := clipMonitor.SetClipboard(msg.Content); err != nil {
+					log.Printf("Failed to update clipboard: %v", err)
+				}
+
+			case protocol.TypeServerAck:
+				log.Printf("Server acknowledged connection")
+
+			case protocol.TypeError:
+				log.Printf("Server error: %s", msg.Error)
+
+			case protocol.TypePong:
+				// Игнорируем pong сообщения
+
+			default:
+				log.Printf("Unknown message type: %s", msg.Type)
+			}
+		}
+	}()
+
+	log.Printf("Client started successfully")
+	log.Printf("Monitoring clipboard and syncing with server...")
+
+	// Ожидаем сигнала завершения
+	sigint := make(chan os.Signal, 1)
+	signal.Notify(sigint, os.Interrupt, syscall.SIGTERM)
+	<-sigint
+
+	log.Println("Shutting down client...")
+	clipMonitor.Stop()
+	wsClient.Close()
+	log.Println("Client stopped")
+}
+
+// getLogPath возвращает путь для лог-файла
+func getLogPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "clipboard-client.log"
+	}
+	return filepath.Join(home, ".clipboard-client.log")
+}

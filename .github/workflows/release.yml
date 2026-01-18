@@ -1,0 +1,288 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v1.0.0)'
+        required: false
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build binaries
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Get dependencies
+        run: |
+          go mod download
+          go mod tidy
+
+      - name: Set version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "Building version: $VERSION"
+
+      - name: Build Server (OpenWRT ARM64)
+        run: |
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build \
+            -ldflags="-s -w -X main.version=${{ steps.version.outputs.VERSION }}" \
+            -trimpath \
+            -o bin/clipboard-server-openwrt \
+            ./cmd/server
+          
+      - name: Build Client (Windows x64)
+        run: |
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build \
+            -ldflags="-s -w -H=windowsgui -X main.version=${{ steps.version.outputs.VERSION }}" \
+            -trimpath \
+            -o bin/clipboard-client-windows.exe \
+            ./cmd/client
+
+      - name: Build Client (Linux x64)
+        run: |
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build \
+            -ldflags="-s -w -X main.version=${{ steps.version.outputs.VERSION }}" \
+            -trimpath \
+            -o bin/clipboard-client-linux \
+            ./cmd/client
+
+      - name: Build Client (macOS ARM64)
+        run: |
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build \
+            -ldflags="-s -w -X main.version=${{ steps.version.outputs.VERSION }}" \
+            -trimpath \
+            -o bin/clipboard-client-macos-arm64 \
+            ./cmd/client
+
+      - name: Build Client (macOS x64)
+        run: |
+          GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build \
+            -ldflags="-s -w -X main.version=${{ steps.version.outputs.VERSION }}" \
+            -trimpath \
+            -o bin/clipboard-client-macos-amd64 \
+            ./cmd/client
+
+      - name: Create macOS Universal Binary
+        run: |
+          # Для создания универсального бинарника нужен lipo, но мы на Linux
+          # Поэтому просто оставим оба варианта отдельно
+          echo "macOS binaries built separately for ARM64 and AMD64"
+
+      - name: Display binary sizes
+        run: |
+          echo "📦 Binary sizes:"
+          ls -lh bin/
+          echo ""
+          echo "Total size: $(du -sh bin/ | cut -f1)"
+
+      - name: Create checksums
+        run: |
+          cd bin
+          sha256sum * > checksums.txt
+          cat checksums.txt
+
+      - name: Create release archive
+        run: |
+          # Создаем архивы для каждой платформы
+          cd bin
+          
+          # Server
+          tar -czf clipboard-server-openwrt-${{ steps.version.outputs.VERSION }}.tar.gz clipboard-server-openwrt
+          
+          # Windows
+          zip clipboard-client-windows-${{ steps.version.outputs.VERSION }}.zip clipboard-client-windows.exe
+          
+          # Linux
+          tar -czf clipboard-client-linux-${{ steps.version.outputs.VERSION }}.tar.gz clipboard-client-linux
+          
+          # macOS
+          tar -czf clipboard-client-macos-arm64-${{ steps.version.outputs.VERSION }}.tar.gz clipboard-client-macos-arm64
+          tar -czf clipboard-client-macos-amd64-${{ steps.version.outputs.VERSION }}.tar.gz clipboard-client-macos-amd64
+          
+          ls -lh *.tar.gz *.zip
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries
+          path: |
+            bin/clipboard-server-openwrt
+            bin/clipboard-client-windows.exe
+            bin/clipboard-client-linux
+            bin/clipboard-client-macos-arm64
+            bin/clipboard-client-macos-amd64
+            bin/checksums.txt
+            bin/*.tar.gz
+            bin/*.zip
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: binaries
+          path: bin/
+
+      - name: Set version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Generate Release Notes
+        run: |
+          cat > release_notes.md << 'EOF'
+          # OpenWRT Clipboard ${{ steps.version.outputs.VERSION }}
+          
+          Централизованный буфер обмена для локальной сети через роутер OpenWRT.
+          
+          ## 🎯 Что включено
+          
+          - ✅ WebSocket сервер для OpenWRT (ARM64)
+          - ✅ Клиенты для Windows, Linux, macOS
+          - ✅ Автоматическая синхронизация буфера обмена
+          - ✅ Автоматический реконнект
+          - ✅ Веб-интерфейс для мониторинга
+          
+          ## 📦 Файлы для скачивания
+          
+          ### Сервер (OpenWRT)
+          - `clipboard-server-openwrt-${{ steps.version.outputs.VERSION }}.tar.gz` - для роутера Cudy WR3000S v1 и других ARM64 роутеров
+          
+          ### Клиенты
+          - `clipboard-client-windows-${{ steps.version.outputs.VERSION }}.zip` - для Windows 10/11 (x64)
+          - `clipboard-client-linux-${{ steps.version.outputs.VERSION }}.tar.gz` - для Linux (x64)
+          - `clipboard-client-macos-arm64-${{ steps.version.outputs.VERSION }}.tar.gz` - для macOS (Apple Silicon)
+          - `clipboard-client-macos-amd64-${{ steps.version.outputs.VERSION }}.tar.gz` - для macOS (Intel)
+          
+          ## 🚀 Быстрый старт
+          
+          ### 1. Установка сервера на роутер
+          
+          ```bash
+          # Скачать и распаковать
+          wget https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/clipboard-server-openwrt-${{ steps.version.outputs.VERSION }}.tar.gz
+          tar -xzf clipboard-server-openwrt-${{ steps.version.outputs.VERSION }}.tar.gz
+          
+          # Загрузить на роутер
+          scp clipboard-server-openwrt root@192.168.1.1:/tmp/clipboard-server
+          
+          # Запустить на роутере
+          ssh root@192.168.1.1
+          chmod +x /tmp/clipboard-server
+          /tmp/clipboard-server -addr :8080
+          ```
+          
+          ### 2. Установка клиента
+          
+          #### Windows
+          ```cmd
+          # Распаковать ZIP
+          # Запустить: clipboard-client-windows.exe -server ws://192.168.1.1:8080/ws
+          ```
+          
+          #### Linux
+          ```bash
+          tar -xzf clipboard-client-linux-${{ steps.version.outputs.VERSION }}.tar.gz
+          sudo mv clipboard-client-linux /usr/local/bin/clipboard-client
+          sudo chmod +x /usr/local/bin/clipboard-client
+          clipboard-client -server ws://192.168.1.1:8080/ws
+          ```
+          
+          #### macOS
+          ```bash
+          # Для Apple Silicon (M1/M2/M3)
+          tar -xzf clipboard-client-macos-arm64-${{ steps.version.outputs.VERSION }}.tar.gz
+          sudo mv clipboard-client-macos-arm64 /usr/local/bin/clipboard-client
+          
+          # Для Intel
+          tar -xzf clipboard-client-macos-amd64-${{ steps.version.outputs.VERSION }}.tar.gz
+          sudo mv clipboard-client-macos-amd64 /usr/local/bin/clipboard-client
+          
+          sudo chmod +x /usr/local/bin/clipboard-client
+          clipboard-client -server ws://192.168.1.1:8080/ws
+          ```
+          
+          ## 📚 Документация
+          
+          Полная документация доступна в репозитории:
+          - [QUICKSTART.md](https://github.com/${{ github.repository }}/blob/main/QUICKSTART.md) - Подробные инструкции
+          - [PROJECT_STATUS.md](https://github.com/${{ github.repository }}/blob/main/PROJECT_STATUS.md) - Статус проекта
+          - [NOTES.md](https://github.com/${{ github.repository }}/blob/main/NOTES.md) - Технические заметки
+          
+          ## 🔍 Проверка целостности
+          
+          Используйте файл `checksums.txt` для проверки SHA256 хешей.
+          
+          ## ⚠️ Требования
+          
+          - **Сервер**: OpenWRT роутер с ARM64 архитектурой
+          - **Клиенты**: Windows 10+, Linux, macOS 10.15+
+          - **Сеть**: Локальная сеть с доступом к роутеру
+          
+          ## 🐛 Сообщить о проблеме
+          
+          Если вы нашли баг или у вас есть предложения, создайте [Issue](https://github.com/${{ github.repository }}/issues).
+          EOF
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.VERSION }}
+          name: Release ${{ steps.version.outputs.VERSION }}
+          body_path: release_notes.md
+          files: |
+            bin/*.tar.gz
+            bin/*.zip
+            bin/checksums.txt
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload individual binaries
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.VERSION }}
+          files: |
+            bin/clipboard-server-openwrt
+            bin/clipboard-client-windows.exe
+            bin/clipboard-client-linux
+            bin/clipboard-client-macos-arm64
+            bin/clipboard-client-macos-amd64
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
