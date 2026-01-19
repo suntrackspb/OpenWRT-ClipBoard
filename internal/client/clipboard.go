@@ -3,6 +3,8 @@ package client
 import (
 	"fmt"
 	"log"
+	"os"
+	"strings"
 	"time"
 
 	goclipboard "github.com/atotto/clipboard"
@@ -71,6 +73,11 @@ func (m *ClipboardMonitor) checkClipboard() {
 		return
 	}
 
+	// Игнорируем пути к файлам
+	if isFilePath(content) {
+		return
+	}
+
 	// Вычисляем хеш
 	hash := computeHash(content)
 
@@ -92,9 +99,16 @@ func (m *ClipboardMonitor) updateLastHash() {
 	if err != nil {
 		return
 	}
-	if len(text) > 0 {
-		m.lastHash = computeHash(text)
+	if len(text) == 0 {
+		return
 	}
+
+	// Игнорируем пути к файлам
+	if isFilePath(text) {
+		return
+	}
+
+	m.lastHash = computeHash(text)
 }
 
 // SetClipboard устанавливает содержимое буфера обмена
@@ -116,6 +130,38 @@ func (m *ClipboardMonitor) SetClipboard(content string) error {
 func (m *ClipboardMonitor) Stop() {
 	close(m.stopChan)
 	log.Printf("Clipboard monitor stopped")
+}
+
+// isFilePath проверяет является ли строка путем к файлу
+func isFilePath(text string) bool {
+	// Убираем пробелы по краям
+	text = strings.TrimSpace(text)
+	if len(text) == 0 {
+		return false
+	}
+
+	// Проверяем паттерны путей
+	// Unix/Mac пути начинаются с /
+	if strings.HasPrefix(text, "/") {
+		// Проверяем что это реальный файл
+		if info, err := os.Stat(text); err == nil && !info.IsDir() {
+			return true
+		}
+	}
+
+	// Windows пути начинаются с C:\ или подобное
+	if len(text) >= 3 && text[1] == ':' && (text[2] == '\\' || text[2] == '/') {
+		if info, err := os.Stat(text); err == nil && !info.IsDir() {
+			return true
+		}
+	}
+
+	// file:// URI
+	if strings.HasPrefix(text, "file://") {
+		return true
+	}
+
+	return false
 }
 
 // computeHash вычисляет хеш строки
